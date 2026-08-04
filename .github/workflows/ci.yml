@@ -1,0 +1,94 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # Allows the release workflow to reuse these same security checks.
+  workflow_call:
+
+# Least-privilege permissions: this job only needs to read the repository.
+permissions:
+  contents: read
+
+jobs:
+  security-ci:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Full history so Gitleaks can scan every commit, not just the latest.
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: npm audit
+        # Fails on high/critical vulnerabilities in the npm dependency tree.
+        run: npm audit --audit-level=high
+
+      - name: Tests
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      - name: Gitleaks
+        # Scans the full git history for accidentally committed secrets.
+        # Fails the job if any secret is detected.
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Semgrep
+        # SAST scan using the free, community-maintained "security-audit" ruleset.
+        # Exits non-zero when issues are found, failing the job.
+        run: |
+          pip install semgrep
+          mkdir -p security-reports
+          semgrep scan --config p/security-audit --json --output security-reports/semgrep.json
+
+      - name: Docker build
+        run: docker build -t security-ci-lab:${{ github.sha }} .
+
+      - name: Trivy image scan
+        # Scan the final image. HIGH + CRITICAL appear in the report;
+        # lower severities are filtered out of this minimal policy.
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: security-ci-lab:${{ github.sha }}
+          format: json
+          output: security-reports/trivy.json
+          severity: CRITICAL,HIGH
+          exit-code: "0"
+
+      - name: Fail on critical vulnerabilities
+        # Trivy itself does not block here; only CRITICAL findings fail CI.
+        run: |
+          count=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL")] | length' security-reports/trivy.json)
+          echo "Critical vulnerabilities found: $count"
+          if [ "$count" -gt 0 ]; then
+            echo "::error::CRITICAL vulnerabilities found in the container image. Update the base image or dependencies, then rebuild and rescan."
+            exit 1
+          fi
+
+      - name: Remove Docker image
+        # The image was only needed for the Trivy scan. Clean it up from the
+        # runner afterwards, even if the scan or the critical gate failed.
+        if: always()
+        run: docker rmi security-ci-lab:${{ github.sha }}
+
+      - name: Upload security reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-reports
+          path: security-reports/
+          # Reports are only needed temporarily for this lab.
+          retention-days: 1
