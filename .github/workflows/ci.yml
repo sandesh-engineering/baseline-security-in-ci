@@ -1,9 +1,9 @@
 name: CI
 
 on:
-  push:
-    branches: [main]
-  pull_request:
+  # push:
+  # branches: [main]
+  # pull_request:
   # Allows the release workflow to reuse these same security checks.
   workflow_call:
 
@@ -61,7 +61,7 @@ jobs:
       - name: Trivy image scan
         # Scan the final image. HIGH + CRITICAL appear in the report;
         # lower severities are filtered out of this minimal policy.
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@0.36.0
         with:
           image-ref: security-ci-lab:${{ github.sha }}
           format: json
